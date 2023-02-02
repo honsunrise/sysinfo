@@ -407,7 +407,6 @@ fn retrieve_all_new_process_info(
     }
 
     p.cmd = copy_from_file(tmp.join("cmdline"));
-    p.environ = copy_from_file(tmp.join("environ"));
     p.cwd = realpath(tmp.join("cwd"));
     p.root = realpath(tmp.join("root"));
 
@@ -436,11 +435,6 @@ pub(crate) fn _get_process_data(
     refresh_kind: ProcessRefreshKind,
 ) -> Result<(Option<Process>, Pid), ()> {
     let pid = match path.file_name().and_then(|x| x.to_str()).map(Pid::from_str) {
-        // If `pid` and `nb` are the same, it means the file is linking to itself so we skip it.
-        //
-        // It's because when reading `/proc/[PID]` folder, we then go through the folders inside it.
-        // Then, if we encounter a sub-folder with the same PID as the parent, then it's a link to
-        // the current folder we already did read so no need to do anything.
         Some(Ok(nb)) if nb != pid => nb,
         _ => return Err(()),
     };
@@ -630,27 +624,29 @@ pub(crate) fn refresh_procs(
 fn copy_from_file(entry: &Path) -> Vec<String> {
     match File::open(entry) {
         Ok(mut f) => {
-            let mut data = Vec::with_capacity(16_384);
-
-            if let Err(_e) = f.read_to_end(&mut data) {
-                sysinfo_debug!("Failed to read file in `copy_from_file`: {:?}", _e);
-                Vec::new()
-            } else {
-                let mut out = Vec::with_capacity(20);
-                let mut start = 0;
-                for (pos, x) in data.iter().enumerate() {
-                    if *x == 0 {
-                        if pos - start >= 1 {
-                            if let Ok(s) =
-                                std::str::from_utf8(&data[start..pos]).map(|x| x.trim().to_owned())
-                            {
-                                out.push(s);
-                            }
-                        }
-                        start = pos + 1; // to keeping prevent '\0'
-                    }
+            let mut data = [0_u8; 4096];
+            match f.read(&mut data[..4094]) {
+                Err(_e) => {
+                    sysinfo_debug!("Failed to read file in `copy_from_file`: {:?}", _e);
+                    Vec::new()
                 }
-                out
+                Ok(size) => {
+                    let mut out = Vec::with_capacity(20);
+                    let mut start = 0;
+                    for (pos, x) in data[..size+1].iter().enumerate() {
+                        if *x == 0 {
+                            if pos - start >= 1 {
+                                if let Ok(s) =
+                                    std::str::from_utf8(&data[start..pos]).map(|x| x.trim().to_owned())
+                                {
+                                    out.push(s);
+                                }
+                            }
+                            start = pos + 1; // to keeping prevent '\0'
+                        }
+                    }
+                    out
+                }
             }
         }
         Err(_e) => {
